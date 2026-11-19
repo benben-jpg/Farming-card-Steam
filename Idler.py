@@ -57,9 +57,8 @@ def start_idle(app_id: str) -> subprocess.Popen:
     )
 
 
-# --------------------------------------------------------------------------
+
 # Bagian deteksi card drop (membaca halaman badge milik akun sendiri)
-# --------------------------------------------------------------------------
 
 def load_config():
     if not os.path.exists(CONFIG_FILE):
@@ -133,9 +132,8 @@ def fetch_games_with_drops(cfg):
     return games
 
 
-# --------------------------------------------------------------------------
+
 # Mode --list dan --auto
-# --------------------------------------------------------------------------
 
 def mode_list():
     cfg = load_config()
