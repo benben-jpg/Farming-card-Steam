@@ -57,8 +57,8 @@ def start_idle(app_id: str) -> subprocess.Popen:
     )
 
 
-
 # Bagian deteksi card drop (membaca halaman badge milik akun sendiri)
+
 
 def load_config():
     if not os.path.exists(CONFIG_FILE):
@@ -91,23 +91,65 @@ def fetch_badge_page(cfg, page: int) -> str:
     return body
 
 
-ROW_SPLIT = re.compile(r'<div class="badge_row\b')
+DROP_RE = re.compile(r"(\d+)\s+card drops? remaining", re.I)
+NODROP_RE = re.compile(r"No card drops? remaining", re.I)
+GAMECARD_RE = re.compile(r"/gamecards/(\d+)")
+CLASS_TAG_RE = re.compile(r"<[a-zA-Z][^>]*?\sclass\s*=\s*[\"']([^\"']*)[\"']")
+
+
+def split_rows(body: str):
+    """Cari pembungkus baris badge secara otomatis (tahan perubahan markup).
+
+    Untuk tiap nama class, halaman dipotong di setiap kemunculannya, lalu diberi
+    skor: berapa blok yang memuat tepat satu link /gamecards/<appid> dan teks
+    status card drop. Class dengan skor tertinggi dipakai sebagai pemisah baris.
+    """
+    n_status = len(DROP_RE.findall(body)) + len(NODROP_RE.findall(body))
+    if n_status == 0:
+        return None, []
+    positions = {}
+    for m in CLASS_TAG_RE.finditer(body):
+        for token in set(m.group(1).split()):
+            positions.setdefault(token, []).append(m.start())
+    best_token, best_blocks, best_score = None, [], 0
+    for token, pos in positions.items():
+        if not (n_status * 0.9 <= len(pos) <= n_status * 2 + 10):
+            continue
+        blocks = [body[x:y] for x, y in zip(pos, pos[1:] + [len(body)])]
+        score = 0
+        for blk in blocks:
+            if (len(set(GAMECARD_RE.findall(blk))) == 1
+                    and (DROP_RE.search(blk) or NODROP_RE.search(blk))):
+                score += 1
+        if score > best_score:
+            best_token, best_blocks, best_score = token, blocks, score
+    return best_token, best_blocks
 
 
 def parse_games(body: str):
-    games = []
-    for block in ROW_SPLIT.split(body)[1:]:
-        m_id = re.search(r"/gamecards/(\d+)", block)
-        m_drop = re.search(r"(\d+)\s+card drops? remaining", block)
-        if not m_id or not m_drop:
+    games, seen = [], set()
+    _, blocks = split_rows(body)
+    for block in blocks:
+        ids = set(GAMECARD_RE.findall(block))
+        m_drop = DROP_RE.search(block)
+        if len(ids) != 1 or not m_drop:
             continue
-        m_name = re.search(r'<div class="badge_title">\s*(.*?)\s*(?:&nbsp;|<)',
-                           block, re.S)
-        m_hrs = re.search(r"([\d,.]+)\s*hrs on record", block)
-        hours = float(m_hrs.group(1).replace(",", "")) if m_hrs else 0.0
+        appid = next(iter(ids))
+        if appid in seen:
+            continue
+        seen.add(appid)
+        m_name = re.search(
+            r'class="[^"]*\bbadge_title\b[^"]*"[^>]*>\s*([^<]*?)\s*(?:&nbsp;|<)',
+            block, re.S)
+        m_hrs = re.search(r"(\d[\d,.]*)\s*hrs? on record", block)
+        try:
+            hours = float(m_hrs.group(1).replace(",", "")) if m_hrs else LOW_HOURS
+        except ValueError:
+            hours = LOW_HOURS
+        name = html.unescape(m_name.group(1)) if m_name and m_name.group(1) else appid
         games.append({
-            "appid": m_id.group(1),
-            "name": html.unescape(m_name.group(1)) if m_name else m_id.group(1),
+            "appid": appid,
+            "name": name,
             "drops": int(m_drop.group(1)),
             "hours": hours,
         })
@@ -132,7 +174,6 @@ def fetch_games_with_drops(cfg):
     return games
 
 
-
 # Mode --list dan --auto
 
 def mode_list():
@@ -140,12 +181,45 @@ def mode_list():
     games = fetch_games_with_drops(cfg)
     if not games:
         print("Tidak ada game dengan card drop tersisa.")
+        print("(Kalau kamu yakin masih ada, jalankan: python Idler.py --debug)")
         return
     total = sum(g["drops"] for g in games)
     print(f"{len(games)} game, total {total} card drop tersisa:\n")
     for g in sorted(games, key=lambda x: -x["drops"]):
         print(f"  {g['appid']:>8}  {g['drops']:>2} drop  "
               f"{g['hours']:>6.1f} jam  {g['name']}")
+
+
+def mode_debug():
+    """Diagnosa: ambil halaman badge dan tampilkan hitungan elemen penting."""
+    cfg = load_config()
+    body = fetch_badge_page(cfg, 1)
+    out = os.path.join(HERE, "debug_badges.html")
+    with open(out, "w", encoding="utf-8") as f:
+        f.write(body)
+    token, blocks = split_rows(body)
+    games = parse_games(body)
+    print(f"Halaman diambil: {len(body)} karakter (disimpan di {out})")
+    print(f"  link '/gamecards/'            : {body.count('/gamecards/')}")
+    print(f"  teks 'card drops remaining'   : {len(DROP_RE.findall(body))}")
+    print(f"  teks 'No card drops remaining': {len(NODROP_RE.findall(body))}")
+    print(f"  jumlah halaman badge          : {count_pages(body)}")
+    print(f"  class pemisah baris terdeteksi: {token}")
+    print(f"  jumlah blok baris             : {len(blocks)}")
+    print(f"  hasil parser (game ada drop)  : {len(games)}")
+    if games:
+        g = games[0]
+        print(f"  contoh: {g['name']} ({g['appid']}) "
+              f"{g['drops']} drop, {g['hours']} jam")
+    else:
+        m = DROP_RE.search(body)
+        if m:
+            start = max(0, m.start() - 900)
+            snippet = re.sub(r"\s+", " ", body[start:m.end() + 300])
+            print("\nCuplikan HTML di sekitar teks drop pertama:\n")
+            print(snippet)
+    print("\nCatatan: file debug_badges.html berisi halaman profilmu, "
+          "jangan dibagikan sembarangan.")
 
 
 def mode_auto():
@@ -244,6 +318,8 @@ def main():
         mode_list()
     elif args == ["--auto"]:
         mode_auto()
+    elif args == ["--debug"]:
+        mode_debug()
     elif args and all(a.isdigit() for a in args):
         mode_manual(args)
     else:
