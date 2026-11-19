@@ -1,0 +1,8 @@
+{
+  "sessionid": "fill_in_with_sessionid",
+  "steamLoginSecure": "fill_in_with_steamLoginSecure",
+  "check_interval_minutes": 10,
+  "max_parallel": 30,
+  "low_hours_parallel": 1,
+  "blacklist": []
+}
